@@ -574,23 +574,22 @@ def initial_model():
     }
 
 
-def train(model, games, seed):
+def train(model, games, seed, test_games=200, test_seed=20261028):
     rng = random.Random(seed)
     current = normalize_weights(model["weights"])
 
     training_games = max(20, int(games))
-    test_games = max(50, min(200, int(games)))
+    test_games = max(50, int(test_games))
 
-    # Candidate policies share identical training deals.
     training_deals = make_deals(
         training_games,
-        seed + 100,
+        int(seed) + 100,
     )
 
-    # A separate batch is used to compare the proposed policy.
+    # Fixed test deals make comparisons consistent across rounds.
     testing_deals = make_deals(
         test_games,
-        seed + 900000,
+        int(test_seed),
     )
 
     candidates = [current.copy()]
@@ -622,7 +621,6 @@ def train(model, games, seed):
 
     proposed = candidates[best_index]
 
-    # Compare current and proposed policies on the same test deals.
     before = evaluate(current, testing_deals)
     proposed_test = evaluate(proposed, testing_deals)
 
@@ -631,9 +629,7 @@ def train(model, games, seed):
     after = proposed_test if accepted else before
 
     model["weights"] = normalize_weights(chosen)
-    model["games"] = (
-        int(model.get("games", 0)) + training_games
-    )
+    model["games"] = int(model.get("games", 0)) + training_games
 
     history = model.setdefault("history", [])
 
@@ -650,6 +646,7 @@ def train(model, games, seed):
         "vs_ad_rate": round(after["vs_ad_rate"], 4),
         "avg_wins": round(after["avg_wins"], 3),
         "test_games": test_games,
+        "test_seed": int(test_seed),
     })
 
     model["history"] = history[-100:]
@@ -660,6 +657,7 @@ def train(model, games, seed):
         "after": after,
         "training_games": training_games,
         "test_games": test_games,
+        "test_seed": int(test_seed),
     }
 
 
@@ -836,6 +834,26 @@ with learner_tab:
         key="training_games",
     )
 
+    test_games = st.select_slider(
+        "Test deals",
+        options=[50, 100, 200, 300, 500, 1000],
+        value=200,
+        key="test_games",
+        help=(
+            "More test deals give a more stable evaluation, "
+            "but take longer to run."
+        ),
+    )
+
+    test_seed = st.number_input(
+        "Fixed test seed",
+        min_value=0,
+        max_value=2_147_483_647,
+        value=20261028,
+        step=1,
+        key="test_seed",
+    )
+
     training_seed = st.number_input(
         "Random seed",
         min_value=0,
@@ -859,19 +877,22 @@ with learner_tab:
                 # train() accepts positional arguments (model, games, seed)
                 # and returns (updated_model, report).
                 updated_model, report = train(
-                    st.session_state.model_state,
-                    int(training_games),
-                    int(training_seed),
-                )
+    st.session_state.model_state,
+    int(training_games),
+    int(training_seed),
+    test_games=int(test_games),
+    test_seed=int(test_seed),
+)! 
 
                 updated_model["latest_test_score"] = report["after"]["score"]
                 updated_model["latest_result"] = (
-                    f"Training completed. "
-                    f"Accepted new weights: {report['accepted']}. "
-                    f"Test score before: {report['before']['score']:.4f}. "
-                    f"Test score after: {report['after']['score']:.4f}. "
-                    f"Test deals: {report['test_games']}."
-                )
+    f"Training completed. "
+    f"Accepted new weights: {report['accepted']}. "
+    f"Test score before: {report['before']['score']:.4f}. "
+    f"Test score after: {report['after']['score']:.4f}. "
+    f"Test deals: {report['test_games']}. "
+    f"Test seed: {report['test_seed']}."
+)
 
                 st.session_state.model_state = updated_model
 
