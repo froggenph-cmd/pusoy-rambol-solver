@@ -882,7 +882,7 @@ with learner_tab:
     int(training_seed),
     test_games=int(test_games),
     test_seed=int(test_seed),
-)! 
+) 
 
                 updated_model["latest_test_score"] = report["after"]["score"]
                 updated_model["latest_result"] = (
