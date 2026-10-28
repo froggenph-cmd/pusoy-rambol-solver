@@ -334,35 +334,53 @@ solver_tab,learner_tab,play_tab,rules_tab=st.tabs(["Hand solver","Self-play lear
 
 with solver_tab:
     st.subheader("Find strong arrangements for your 13 cards")
-    st.info("Suggestions are heuristic, not guaranteed optimal against unknown opponents. Cross-row foul validation retains the current simplified rule.")
-    with st.form("cards_form"):
-        cols=st.columns(4); selected=[]
-        for i in range(13):
-            with cols[i%4]: selected.append(st.selectbox(f"Card {i+1}",options=["— choose —"]+DECK,format_func=lambda c:c if c=="— choose —" else card_label(c),key=f"card_{i}"))
-        submitted=st.form_submit_button("Find strong arrangements",type="primary",use_container_width=True)
-    if submitted:
-        cards=[c for c in selected if c!="— choose —"]
-        if len(cards)!=13: st.error(f"Please select all 13 cards. You selected {len(cards)}.")
-        elif len(set(cards))!=13: st.error("A card was selected more than once.")
-        else:
-            with st.spinner("Searching legal arrangements..."):
-                results=arrangement_candidates(cards,sample_count=None)
-                results.sort(key=lambda x:strategy_score(x,weights),reverse=True)
-                unique=[]; seen=set()
-                for item in results:
-                    sig=(item[3],item[4],item[5])
-                    if sig in seen: continue
-                    seen.add(sig); unique.append(item)
-                    if len(unique)>=10: break
-            st.write(f"Found **{len(results):,} legal arrangements**. Showing up to 10 distinct hand-strength profiles.")
-            for idx,item in enumerate(unique,1):
-                b,m,t,rb,rm,rt=item
-                with st.container(border=True):
-                    st.subheader(f"Option {idx}"); c1,c2,c3=st.columns(3)
-                    with c1: st.markdown("**BOTTOM · 5**"); st.write(show_cards(b)); st.caption(category(rb))
-                    with c2: st.markdown("**MIDDLE · 5**"); st.write(show_cards(m)); st.caption(category(rm))
-                    with c3: st.markdown("**TOP · 3**"); st.write(show_cards(t)); st.caption(category(rt,True))
-                    st.caption(f"Policy score: {strategy_score(item,weights):,.1f}")
+    st.info("Tap cards to select or unselect them. Select exactly 13, then find strong arrangements.")
+    chosen_key = "solver_selected_cards"
+    if chosen_key not in st.session_state:
+        st.session_state[chosen_key] = []
+    selected_cards = st.session_state[chosen_key]
+    st.write(f"**Selected: {len(selected_cards)}/13 cards**")
+    if st.button("Clear selected cards", key="solver_clear_cards"):
+        st.session_state[chosen_key] = []
+        st.session_state.pop("solver_results", None)
+        st.rerun()
+    for row_start in range(0, 52, 4):
+        cols = st.columns(4)
+        for j, card in enumerate(DECK[row_start:row_start+4]):
+            with cols[j]:
+                chosen = card in selected_cards
+                label = ("✓ " if chosen else "") + card_label(card)
+                if st.button(label, key=f"solver_card_{card}", use_container_width=True, type="primary" if chosen else "secondary"):
+                    current = list(st.session_state[chosen_key])
+                    if card in current:
+                        current.remove(card)
+                    elif len(current) < 13:
+                        current.append(card)
+                    st.session_state[chosen_key] = current
+                    st.rerun()
+    if st.button("Find strong arrangements", type="primary", use_container_width=True, disabled=len(selected_cards) != 13, key="solver_find_arrangements"):
+        cards = list(selected_cards)
+        with st.spinner("Searching legal arrangements..."):
+            results = arrangement_candidates(cards, sample_count=None)
+            results.sort(key=lambda x:strategy_score(x,weights), reverse=True)
+            unique=[]; seen=set()
+            for item in results:
+                sig=(item[3],item[4],item[5])
+                if sig in seen: continue
+                seen.add(sig); unique.append(item)
+                if len(unique)>=10: break
+            st.session_state.solver_results = (len(results), unique)
+    if len(selected_cards) == 13 and st.session_state.get("solver_results"):
+        total, unique = st.session_state.solver_results
+        st.write(f"Found **{total:,} legal arrangements**. Showing up to 10 distinct hand-strength profiles.")
+        for idx,item in enumerate(unique,1):
+            b,m,t,rb,rm,rt=item
+            with st.container(border=True):
+                st.subheader(f"Option {idx}"); c1,c2,c3=st.columns(3)
+                with c1: st.markdown("**BOTTOM · 5**"); st.write(show_cards(b)); st.caption(category(rb))
+                with c2: st.markdown("**MIDDLE · 5**"); st.write(show_cards(m)); st.caption(category(rm))
+                with c3: st.markdown("**TOP · 3**"); st.write(show_cards(t)); st.caption(category(rt,True))
+                st.caption(f"Policy score: {strategy_score(item,weights):,.1f}")
 
 with learner_tab:
     st.subheader("Player 1 controlled self-play learning")
@@ -436,78 +454,105 @@ with play_tab:
             st.session_state.human_hand = shuffled_deck[:13]
             st.session_state.human_predealt_opponents = [shuffled_deck[13+i*13:13+(i+1)*13] for i in range(3)]
             reset_arrangement_state()
+            st.session_state.human_rows = {"Bottom": [], "Middle": [], "Top": []}
+            st.session_state.human_selected_for_move = None
             st.rerun()
     else:
-        with st.form("human_hand_form"):
-            st.markdown("**Select your 13 cards**")
-            hand_cols = st.columns(4)
-            human_selected = []
-            for i in range(13):
-                with hand_cols[i % 4]:
-                    human_selected.append(st.selectbox(
-                        f"Your card {i+1}", options=["— choose —"] + DECK,
-                        format_func=lambda c: c if c == "— choose —" else card_label(c),
-                        key=f"human_card_{i}"
-                    ))
-            hand_submit = st.form_submit_button("Confirm my 13 cards", use_container_width=True)
-
-        if hand_submit:
-            chosen = [c for c in human_selected if c != "— choose —"]
-            if len(chosen) != 13:
-                st.error(f"Choose all 13 cards. You selected {len(chosen)}.")
-            elif len(set(chosen)) != 13:
-                st.error("Your 13 cards must be unique.")
-            else:
-                st.session_state.human_hand = chosen
-                st.session_state.pop("human_predealt_opponents", None)
-                reset_arrangement_state()
-                st.success("Your hand is set. Arrange the cards below.")
+        st.markdown("**Tap 13 cards to select your hand**")
+        select_key = "human_custom_selected_cards"
+        if select_key not in st.session_state:
+            st.session_state[select_key] = []
+        chosen_custom = st.session_state[select_key]
+        st.write(f"**Selected: {len(chosen_custom)}/13 cards**")
+        if st.button("Clear card selection", key="human_custom_clear"):
+            st.session_state[select_key] = []
+            st.rerun()
+        for row_start in range(0, 52, 4):
+            cols = st.columns(4)
+            for j, card in enumerate(DECK[row_start:row_start+4]):
+                with cols[j]:
+                    is_chosen = card in chosen_custom
+                    if st.button(("✓ " if is_chosen else "") + card_label(card), key=f"human_custom_card_{card}", use_container_width=True, type="primary" if is_chosen else "secondary"):
+                        current = list(st.session_state[select_key])
+                        if card in current: current.remove(card)
+                        elif len(current) < 13: current.append(card)
+                        st.session_state[select_key] = current
+                        st.rerun()
+        if st.button("Confirm these 13 cards", use_container_width=True, disabled=len(chosen_custom) != 13, key="human_custom_confirm"):
+            st.session_state.human_hand = list(chosen_custom)
+            st.session_state.pop("human_predealt_opponents", None)
+            reset_arrangement_state()
+            st.session_state.human_rows = {"Bottom": [], "Middle": [], "Top": []}
+            st.session_state.human_selected_for_move = None
+            st.rerun()
 
     human_hand = st.session_state.get("human_hand")
     if human_hand:
-        st.markdown("**Your cards:** " + show_cards(human_hand))
-        st.markdown("**Step 2 — Arrange all 13 cards**")
-        with st.form("human_arrangement_form"):
-            options = human_hand
-            b = st.multiselect("Bottom (choose 5 cards)", options=options, default=st.session_state.get("human_bottom", []), format_func=card_label, max_selections=5, key="human_bottom_input")
-            m = st.multiselect("Middle (choose 5 cards)", options=options, default=st.session_state.get("human_middle", []), format_func=card_label, max_selections=5, key="human_middle_input")
-            t = st.multiselect("Top (choose 3 cards)", options=options, default=st.session_state.get("human_top", []), format_func=card_label, max_selections=3, key="human_top_input")
-            arrange_submit = st.form_submit_button("Play this arrangement", type="primary", use_container_width=True)
-
-        if arrange_submit:
-            all_rows = list(b) + list(m) + list(t)
-            if len(b) != 5 or len(m) != 5 or len(t) != 3:
-                st.error("Choose exactly 5 Bottom, 5 Middle, and 3 Top cards.")
-            elif len(set(all_rows)) != 13 or set(all_rows) != set(human_hand):
-                st.error("Every card must be used exactly once across the three rows.")
-            else:
-                human_arr = (tuple(b), tuple(m), tuple(t), rank_five(b), rank_five(m), rank_top(t))
-                if not foul_free(b, m, t):
-                    st.error("This arrangement is foul under the app's current rule: Bottom must be at least as strong as Middle, and Middle category must be at least Top category.")
-                else:
-                    opponent_hands = st.session_state.get("human_predealt_opponents")
-                    if not opponent_hands or len(opponent_hands) != 3 or set(sum(opponent_hands, [])) != set(DECK) - set(human_hand):
-                        remaining = [c for c in DECK if c not in set(human_hand)]
-                        rr = random.Random(random.SystemRandom().randrange(1, 2**31-1))
-                        rr.shuffle(remaining)
-                        opponent_hands = [remaining[i*13:(i+1)*13] for i in range(3)]
-                    game_seed = random.SystemRandom().randrange(1, 2**31-1)
-                    opponent_arrangements = []
-                    for i, opp_hand in enumerate(opponent_hands):
-                        opp_rng = random.Random(game_seed * 1009 + i * 9176 + 31)
-                        opp_arr = choose_arrangement(opp_hand, normalize_weights(st.session_state.model_state["weights"]), "learned", opp_rng)
-                        opponent_arrangements.append(opp_arr)
-                    human_special = detect_special_hand(human_hand)
-                    results = [compare_arrangements(opp_arr, human_arr, opp_hand, human_hand) for opp_arr, opp_hand in zip(opponent_arrangements, opponent_hands)]
-                    st.session_state.human_game_result = {
-                        "human_hand": human_hand, "human_arrangement": human_arr,
-                        "opponent_hands": opponent_hands, "opponent_arrangements": opponent_arrangements,
-                        "results": results, "human_special": human_special, "seed": game_seed,
-                    }
-                    st.session_state.human_bottom = list(b)
-                    st.session_state.human_middle = list(m)
-                    st.session_state.human_top = list(t)
+        st.markdown("### Your 13 cards")
+        st.caption("Tap a card to select it, then tap the row where you want to place it. Tap a card already in a row to select it and move it to another row.")
+        rows = st.session_state.setdefault("human_rows", {"Bottom": [], "Middle": [], "Top": []})
+        # Reconcile saved row state with the current hand.
+        if set(sum(rows.values(), [])) - set(human_hand):
+            rows = {"Bottom": [], "Middle": [], "Top": []}
+            st.session_state.human_rows = rows
+        assigned = sum(rows.values(), [])
+        unassigned = [c for c in human_hand if c not in assigned]
+        selected_move = st.session_state.get("human_selected_for_move")
+        st.markdown("**Cards not yet placed**")
+        if not unassigned:
+            st.caption("All cards have been placed in rows.")
+        for row_start in range(0, len(unassigned), 7):
+            cols = st.columns(7)
+            for j, card in enumerate(unassigned[row_start:row_start+7]):
+                with cols[j]:
+                    if st.button(("👉 " if selected_move == card else "") + card_label(card), key=f"human_unassigned_{card}", use_container_width=True, type="primary" if selected_move == card else "secondary"):
+                        st.session_state.human_selected_for_move = None if selected_move == card else card
+                        st.rerun()
+        row_cols = st.columns(3)
+        limits = {"Bottom":5, "Middle":5, "Top":3}
+        for idx, row_name in enumerate(("Bottom", "Middle", "Top")):
+            with row_cols[idx]:
+                st.markdown(f"**{row_name} · {limits[row_name]} cards**")
+                st.write(show_cards(rows[row_name]) if rows[row_name] else "— empty —")
+                for card in list(rows[row_name]):
+                    if st.button(("👉 " if selected_move == card else "") + card_label(card), key=f"human_row_card_{row_name}_{card}", use_container_width=True, type="primary" if selected_move == card else "secondary"):
+                        st.session_state.human_selected_for_move = None if selected_move == card else card
+                        st.rerun()
+                if st.button(f"Place selected here ({len(rows[row_name])}/{limits[row_name]})", key=f"human_place_{row_name}", use_container_width=True, disabled=selected_move is None or len(rows[row_name]) >= limits[row_name]):
+                    for old_row in rows.values():
+                        if selected_move in old_row: old_row.remove(selected_move)
+                    rows[row_name].append(selected_move)
+                    st.session_state.human_rows = rows
+                    st.session_state.human_selected_for_move = None
                     st.rerun()
+        if st.button("Return selected card to unassigned", key="human_unassign_selected", use_container_width=True, disabled=selected_move is None):
+            for old_row in rows.values():
+                if selected_move in old_row: old_row.remove(selected_move)
+            st.session_state.human_rows = rows
+            st.session_state.human_selected_for_move = None
+            st.rerun()
+        st.write(f"**Placed:** {len(assigned)}/13 cards")
+        ready = len(rows["Bottom"]) == 5 and len(rows["Middle"]) == 5 and len(rows["Top"]) == 3 and len(assigned) == 13
+        if st.button("Play this arrangement", type="primary", use_container_width=True, disabled=not ready, key="human_play_arrangement"):
+            b, m, t = list(rows["Bottom"]), list(rows["Middle"]), list(rows["Top"])
+            human_arr = (tuple(b), tuple(m), tuple(t), rank_five(b), rank_five(m), rank_top(t))
+            if not foul_free(b, m, t):
+                st.error("This arrangement is foul under the app's current rule: Bottom must be at least as strong as Middle, and Middle category must be at least Top category.")
+            else:
+                opponent_hands = st.session_state.get("human_predealt_opponents")
+                if not opponent_hands or len(opponent_hands) != 3 or set(sum(opponent_hands, [])) != set(DECK) - set(human_hand):
+                    remaining = [c for c in DECK if c not in set(human_hand)]
+                    rr = random.Random(random.SystemRandom().randrange(1, 2**31-1)); rr.shuffle(remaining)
+                    opponent_hands = [remaining[i*13:(i+1)*13] for i in range(3)]
+                game_seed = random.SystemRandom().randrange(1, 2**31-1)
+                opponent_arrangements = []
+                for i, opp_hand in enumerate(opponent_hands):
+                    opp_rng = random.Random(game_seed * 1009 + i * 9176 + 31)
+                    opponent_arrangements.append(choose_arrangement(opp_hand, normalize_weights(st.session_state.model_state["weights"]), "learned", opp_rng))
+                human_special = detect_special_hand(human_hand)
+                results = [compare_arrangements(opp_arr, human_arr, opp_hand, human_hand) for opp_arr, opp_hand in zip(opponent_arrangements, opponent_hands)]
+                st.session_state.human_game_result = {"human_hand": human_hand, "human_arrangement": human_arr, "opponent_hands": opponent_hands, "opponent_arrangements": opponent_arrangements, "results": results, "human_special": human_special, "seed": game_seed}
+                st.rerun()
 
     game = st.session_state.get("human_game_result")
     if game:
