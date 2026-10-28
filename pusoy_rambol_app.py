@@ -204,6 +204,65 @@ def play_deal(hands,weights,deal_seed,opponent_modes=("random","strong","balance
         "p1_special_hand":special_hands[0],
     }
 
+
+def compare_arrangements(arr_a, arr_b, hand_a, hand_b, special_a=None, special_b=None):
+    """Compare two arrangements while applying whole-hand special rules first."""
+    special_a = detect_special_hand(hand_a) if special_a is None else special_a
+    special_b = detect_special_hand(hand_b) if special_b is None else special_b
+    if special_a and special_b:
+        return 0
+    if special_a:
+        return 1
+    if special_b:
+        return -1
+    return head_to_head(arr_a, arr_b, hand_a, hand_b)
+
+
+def learn_from_human_game(model, human_hand, human_arrangement, opponent_hands, seed):
+    """Try small weight mutations and keep one only if it performs better on this game."""
+    rng = random.Random(seed)
+    current = normalize_weights(model["weights"])
+    human_special = detect_special_hand(human_hand)
+
+    def score_weights(candidate):
+        outcomes = []
+        for i, opp_hand in enumerate(opponent_hands):
+            rr = random.Random(seed * 1009 + i * 9176 + 31)
+            opp_arr = choose_arrangement(opp_hand, candidate, "learned", rr)
+            if opp_arr is None:
+                outcomes.append(-1)
+            else:
+                outcomes.append(compare_arrangements(opp_arr, human_arrangement, opp_hand, human_hand))
+        # Positive means learner-controlled opponents beat the human.
+        return sum(outcomes), outcomes
+
+    before_score, before_outcomes = score_weights(current)
+    best_weights = current
+    best_score = before_score
+    for _ in range(5):
+        candidate = current.copy()
+        for key in candidate:
+            if rng.random() < 0.7:
+                candidate[key] = max(0.001, min(3.0, candidate[key] * rng.uniform(0.75, 1.30)))
+        candidate_score, _ = score_weights(candidate)
+        if candidate_score > best_score:
+            best_score = candidate_score
+            best_weights = candidate
+    accepted = best_score > before_score
+    if accepted:
+        model["weights"] = normalize_weights(best_weights)
+    model["human_games"] = int(model.get("human_games", 0)) + 1
+    model.setdefault("human_history", []).append({
+        "game": model["human_games"],
+        "before_opponent_score": before_score,
+        "after_opponent_score": best_score if accepted else before_score,
+        "opponent_results": before_outcomes,
+        "weight_update_accepted": accepted,
+        "human_special_hand": human_special,
+    })
+    model["human_history"] = model["human_history"][-100:]
+    return model, before_outcomes, accepted
+
 def initial_model():
     if os.path.exists(MODEL_PATH):
         try:
@@ -271,7 +330,7 @@ model=initial_model()
 if "model_state" not in st.session_state: st.session_state.model_state=model
 model=st.session_state.model_state
 weights=normalize_weights(model["weights"])
-solver_tab,learner_tab,rules_tab=st.tabs(["Hand solver","Self-play learner","Rules & model"])
+solver_tab,learner_tab,play_tab,rules_tab=st.tabs(["Hand solver","Self-play learner","Play vs learner","Rules & model"])
 
 with solver_tab:
     st.subheader("Find strong arrangements for your 13 cards")
@@ -351,8 +410,144 @@ with learner_tab:
         except Exception: pass
         st.rerun()
 
+
+with play_tab:
+    st.subheader("Play a real deal against the learner")
+    st.write("Choose whether to receive a random 13-card hand or select the exact 13 cards you want. The three learner opponents receive the remaining cards from the same 52-card deck, so no card can appear twice.")
+    st.info("This is a lightweight online-learning step, not a guarantee of long-term improvement: one deal is noisy, and accepted updates are based on the current game. Your learned weights are saved to the same model checkpoint.")
+
+    hand_mode = st.radio(
+        "How would you like your hand?",
+        ["Deal random cards", "Select my own cards"],
+        horizontal=True,
+        key="human_hand_mode",
+    )
+
+    def reset_arrangement_state():
+        for key in ("human_bottom", "human_middle", "human_top", "human_bottom_input", "human_middle_input", "human_top_input"):
+            st.session_state.pop(key, None)
+        st.session_state.pop("human_game_result", None)
+
+    if hand_mode == "Deal random cards":
+        st.caption("A fresh shuffled deck is used when you deal. Your opponents receive the other 39 cards.")
+        if st.button("Deal me 13 random cards", type="primary", use_container_width=True, key="deal_random_human_hand"):
+            shuffled_deck = DECK.copy()
+            random.SystemRandom().shuffle(shuffled_deck)
+            st.session_state.human_hand = shuffled_deck[:13]
+            st.session_state.human_predealt_opponents = [shuffled_deck[13+i*13:13+(i+1)*13] for i in range(3)]
+            reset_arrangement_state()
+            st.rerun()
+    else:
+        with st.form("human_hand_form"):
+            st.markdown("**Select your 13 cards**")
+            hand_cols = st.columns(4)
+            human_selected = []
+            for i in range(13):
+                with hand_cols[i % 4]:
+                    human_selected.append(st.selectbox(
+                        f"Your card {i+1}", options=["— choose —"] + DECK,
+                        format_func=lambda c: c if c == "— choose —" else card_label(c),
+                        key=f"human_card_{i}"
+                    ))
+            hand_submit = st.form_submit_button("Confirm my 13 cards", use_container_width=True)
+
+        if hand_submit:
+            chosen = [c for c in human_selected if c != "— choose —"]
+            if len(chosen) != 13:
+                st.error(f"Choose all 13 cards. You selected {len(chosen)}.")
+            elif len(set(chosen)) != 13:
+                st.error("Your 13 cards must be unique.")
+            else:
+                st.session_state.human_hand = chosen
+                st.session_state.pop("human_predealt_opponents", None)
+                reset_arrangement_state()
+                st.success("Your hand is set. Arrange the cards below.")
+
+    human_hand = st.session_state.get("human_hand")
+    if human_hand:
+        st.markdown("**Your cards:** " + show_cards(human_hand))
+        st.markdown("**Step 2 — Arrange all 13 cards**")
+        with st.form("human_arrangement_form"):
+            options = human_hand
+            b = st.multiselect("Bottom (choose 5 cards)", options=options, default=st.session_state.get("human_bottom", []), format_func=card_label, max_selections=5, key="human_bottom_input")
+            m = st.multiselect("Middle (choose 5 cards)", options=options, default=st.session_state.get("human_middle", []), format_func=card_label, max_selections=5, key="human_middle_input")
+            t = st.multiselect("Top (choose 3 cards)", options=options, default=st.session_state.get("human_top", []), format_func=card_label, max_selections=3, key="human_top_input")
+            arrange_submit = st.form_submit_button("Play this arrangement", type="primary", use_container_width=True)
+
+        if arrange_submit:
+            all_rows = list(b) + list(m) + list(t)
+            if len(b) != 5 or len(m) != 5 or len(t) != 3:
+                st.error("Choose exactly 5 Bottom, 5 Middle, and 3 Top cards.")
+            elif len(set(all_rows)) != 13 or set(all_rows) != set(human_hand):
+                st.error("Every card must be used exactly once across the three rows.")
+            else:
+                human_arr = (tuple(b), tuple(m), tuple(t), rank_five(b), rank_five(m), rank_top(t))
+                if not foul_free(b, m, t):
+                    st.error("This arrangement is foul under the app's current rule: Bottom must be at least as strong as Middle, and Middle category must be at least Top category.")
+                else:
+                    opponent_hands = st.session_state.get("human_predealt_opponents")
+                    if not opponent_hands or len(opponent_hands) != 3 or set(sum(opponent_hands, [])) != set(DECK) - set(human_hand):
+                        remaining = [c for c in DECK if c not in set(human_hand)]
+                        rr = random.Random(random.SystemRandom().randrange(1, 2**31-1))
+                        rr.shuffle(remaining)
+                        opponent_hands = [remaining[i*13:(i+1)*13] for i in range(3)]
+                    game_seed = random.SystemRandom().randrange(1, 2**31-1)
+                    opponent_arrangements = []
+                    for i, opp_hand in enumerate(opponent_hands):
+                        opp_rng = random.Random(game_seed * 1009 + i * 9176 + 31)
+                        opp_arr = choose_arrangement(opp_hand, normalize_weights(st.session_state.model_state["weights"]), "learned", opp_rng)
+                        opponent_arrangements.append(opp_arr)
+                    human_special = detect_special_hand(human_hand)
+                    results = [compare_arrangements(opp_arr, human_arr, opp_hand, human_hand) for opp_arr, opp_hand in zip(opponent_arrangements, opponent_hands)]
+                    st.session_state.human_game_result = {
+                        "human_hand": human_hand, "human_arrangement": human_arr,
+                        "opponent_hands": opponent_hands, "opponent_arrangements": opponent_arrangements,
+                        "results": results, "human_special": human_special, "seed": game_seed,
+                    }
+                    st.session_state.human_bottom = list(b)
+                    st.session_state.human_middle = list(m)
+                    st.session_state.human_top = list(t)
+                    st.rerun()
+
+    game = st.session_state.get("human_game_result")
+    if game:
+        st.markdown("### Deal result")
+        if game["human_special"]:
+            st.success("Your special hand: " + ", ".join(game["human_special"]))
+        hcols = st.columns(3)
+        for i, (opp_hand, opp_arr, outcome) in enumerate(zip(game["opponent_hands"], game["opponent_arrangements"], game["results"])):
+            label = "Learner wins" if outcome == 1 else ("You win" if outcome == -1 else "Tie")
+            with hcols[i]:
+                st.markdown(f"**Opponent {i+1} — {label}**")
+                if detect_special_hand(opp_hand):
+                    st.caption("Special: " + ", ".join(detect_special_hand(opp_hand)))
+                st.write("**Bottom:** " + show_cards(opp_arr[0]))
+                st.caption(category(opp_arr[3]))
+                st.write("**Middle:** " + show_cards(opp_arr[1]))
+                st.caption(category(opp_arr[4]))
+                st.write("**Top:** " + show_cards(opp_arr[2]))
+                st.caption(category(opp_arr[5], True))
+        human_wins = sum(x == -1 for x in game["results"])
+        learner_wins = sum(x == 1 for x in game["results"])
+        ties = sum(x == 0 for x in game["results"])
+        st.write(f"**Your head-to-head record:** {human_wins} wins · {ties} ties · {learner_wins} learner wins")
+        if st.button("Record result and let learner learn", type="primary", use_container_width=True, key="learn_from_human_game"):
+            current_model = st.session_state.model_state
+            new_model, old_results, accepted = learn_from_human_game(
+                current_model, game["human_hand"], game["human_arrangement"], game["opponent_hands"], game["seed"]
+            )
+            st.session_state.model_state = new_model
+            try:
+                save_model(new_model)
+            except Exception as e:
+                st.warning(f"The host could not save a local checkpoint: {e}. Download the model JSON below.")
+            st.session_state.human_game_result = None
+            st.success("Game recorded. " + ("A weight update was accepted." if accepted else "No candidate weight update improved this deal, so the weights stayed the same."))
+            st.rerun()
+        st.caption(f"Human games recorded: {model.get('human_games', 0)}")
+
 with rules_tab:
     st.subheader("Rules currently encoded")
-    st.markdown("- Standard 52-card deck; four players receive 13 cards each.\n- A♦ is randomly distributed by shuffling and dealing.\n- Bottom 5, Middle 5, Top 3; no card reused.\n- Five-card ranking: Straight Flush > Four of a Kind > Full House > Flush > Straight > Three of a Kind > Two Pair > One Pair > High Card.\n- Top ranking: Three of a Kind > Pair > High Card; straights and flushes do not count in Top.\n- Special hands are checked across all 13 cards before ordinary row comparisons: any five-card straight flush in one suit, four of a kind, or six pair-units.\n- Four of a kind counts as two pairs toward the six-pairs special hand.\n- A qualifying special hand beats every non-qualifying hand 3–0 regardless of arrangement. If both players qualify, they tie against each other.\n- Ordinary head-to-head win: win at least two of the three corresponding rows.\n- A♦ breaks otherwise-equal row ties if exactly one player holds it anywhere in their hand.\n- Current foul check: Bottom rank ≥ Middle rank and Middle category ≥ Top category.")
+    st.markdown("- Play vs learner lets you arrange a hand against three learner-controlled opponents and record results for online weight updates.\n- Standard 52-card deck; four players receive 13 cards each.\n- A♦ is randomly distributed by shuffling and dealing.\n- Bottom 5, Middle 5, Top 3; no card reused.\n- Five-card ranking: Straight Flush > Four of a Kind > Full House > Flush > Straight > Three of a Kind > Two Pair > One Pair > High Card.\n- Top ranking: Three of a Kind > Pair > High Card; straights and flushes do not count in Top.\n- Special hands are checked across all 13 cards before ordinary row comparisons: any five-card straight flush in one suit, four of a kind, or six pair-units.\n- Four of a kind counts as two pairs toward the six-pairs special hand.\n- A qualifying special hand beats every non-qualifying hand 3–0 regardless of arrangement. If both players qualify, they tie against each other.\n- Ordinary head-to-head win: win at least two of the three corresponding rows.\n- A♦ breaks otherwise-equal row ties if exactly one player holds it anywhere in their hand.\n- Current foul check: Bottom rank ≥ Middle rank and Middle category ≥ Top category.")
     st.warning("The cross-row foul rule remains simplified from the existing app and must be confirmed against your table's exact rule before treating the simulator as rules-perfect.")
     st.write("Download the JSON checkpoint after training. Streamlit Community Cloud may reset local files on restart or redeployment.")
