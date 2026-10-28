@@ -666,74 +666,46 @@ def train(model, games, seed):
 def save_model(model):
     with open(MODEL_PATH, "w", encoding="utf-8") as file:
         json.dump(model, file, indent=2)
+
 # ============================================================
-# PART 3: STREAMLIT INTERFACE
+# PART 3: STREAMLIT INTERFACE — CORRECTED
 # ============================================================
 
-# Load the model once per session.
 if "model_state" not in st.session_state:
-    try:
-        if os.path.exists(MODEL_PATH):
-            with open(MODEL_PATH, "r", encoding="utf-8") as file:
-                loaded_model = json.load(file)
-
-            if isinstance(loaded_model, dict) and "weights" in loaded_model:
-                st.session_state.model_state = loaded_model
-            else:
-                st.session_state.model_state = initial_model()
-        else:
-            st.session_state.model_state = initial_model()
-    except Exception:
-        st.session_state.model_state = initial_model()
+    st.session_state.model_state = initial_model()
 
 model = st.session_state.model_state
 model.setdefault("weights", DEFAULT_WEIGHTS.copy())
+model.setdefault("games", 0)
 model.setdefault("history", [])
-model.setdefault("training_deals", 0)
-model.setdefault("latest_test_score", None)
-model.setdefault("latest_result", "No training completed yet.")
-
-weights = normalize_weights(model["weights"])
+model["weights"] = normalize_weights(model["weights"])
 
 st.title("🃏 Pusoy Rambol Solver & Learner")
-st.caption(
-    "Arrange your 13 cards, compare strategies, and train the solver "
-    "using your Pusoy Rambol rules."
-)
+st.caption("Four-player simulations | Player 1 learning | A♦ tie-break")
 
 solver_tab, learner_tab, rules_tab = st.tabs(
     ["🂡 Hand Solver", "🧠 Learner & Backup", "📘 Rules"]
 )
-
 
 # ------------------------------------------------------------
 # TAB 1: HAND SOLVER
 # ------------------------------------------------------------
 with solver_tab:
     st.subheader("Enter your 13 cards")
-    st.write(
-        "Choose every card in your hand. Each card must be unique. "
-        "The solver will search for foul-free arrangements."
-    )
 
     card_options = [card_label(card) for card in DECK]
-
-    # Store the card selections as labels, then convert them to card IDs.
     selected_labels = []
 
     with st.form("hand_solver_form"):
-        st.write("**Your cards**")
+        st.write("Choose 13 different cards.")
 
         for row_start in range(0, 13, 4):
             cols = st.columns(4)
 
             for offset, col in enumerate(cols):
                 card_index = row_start + offset
-
                 if card_index >= 13:
                     break
-
-                default_label = card_options[card_index]
 
                 with col:
                     chosen = st.selectbox(
@@ -753,143 +725,114 @@ with solver_tab:
 
     if solve_clicked:
         if len(set(selected_labels)) != 13:
-            st.error(
-                "Your hand contains duplicate cards. "
-                "Please select 13 different cards."
-            )
+            st.error("Please select 13 different cards.")
         else:
             label_to_card = {
                 card_label(card): card for card in DECK
             }
             hand = [label_to_card[label] for label in selected_labels]
 
-            with st.spinner("Searching for arrangements..."):
+            with st.spinner("Searching valid arrangements..."):
                 candidates = arrangement_candidates(
                     hand,
                     sample_count=None,
                 )
 
-                if not candidates:
-                    st.error(
-                        "No valid arrangement was found. "
-                        "Please check the foul rules in Part 1."
-                    )
-                else:
-                    # Rank candidate arrangements using the current model.
-                    ranked = sorted(
-                        candidates,
-                        key=lambda arrangement: strategy_score(
-                            arrangement, weights
-                        ),
-                        reverse=True,
-                    )
+            if not candidates:
+                st.error("No valid arrangement was found.")
+            else:
+                weights = normalize_weights(
+                    st.session_state.model_state["weights"]
+                )
+                ranked = sorted(
+                    candidates,
+                    key=lambda item: strategy_score(item, weights),
+                    reverse=True,
+                )
 
-                    # Remove duplicate strength profiles from the display
-                    # so the suggestions are more varied.
-                    displayed = []
-                    seen_profiles = set()
+                displayed = []
+                seen_profiles = set()
 
-                    for arrangement in ranked:
-                        bottom, middle, top, rb, rm, rt = arrangement
+                for item in ranked:
+                    bottom, middle, top, rb, rm, rt = item
+                    profile = (tuple(rb), tuple(rm), tuple(rt))
 
-                        profile = (
-                            tuple(rb),
-                            tuple(rm),
-                            tuple(rt),
-                        )
+                    if profile in seen_profiles:
+                        continue
 
-                        if profile in seen_profiles:
-                            continue
+                    seen_profiles.add(profile)
+                    displayed.append(item)
 
-                        seen_profiles.add(profile)
-                        displayed.append(arrangement)
+                    if len(displayed) >= 10:
+                        break
 
-                        if len(displayed) >= 10:
-                            break
+                st.success(
+                    f"Found {len(candidates):,} valid candidate arrangements."
+                )
+                st.caption(
+                    "Suggestions are ranked by the learned scoring weights. "
+                    "They are not guaranteed to be globally optimal."
+                )
 
-            st.success(
-                f"Found {len(candidates):,} candidate arrangements."
-            )
+                for number, item in enumerate(displayed, start=1):
+                    bottom, middle, top, rb, rm, rt = item
+                    score = strategy_score(item, weights)
 
-            st.caption(
-                "Suggestions are ranked by the current learned scoring "
-                "weights. They are not guaranteed to be mathematically "
-                "optimal against every possible opponent."
-            )
-
-            for number, arrangement in enumerate(displayed, start=1):
-                bottom, middle, top, rb, rm, rt = arrangement
-                score = strategy_score(arrangement, weights)
-
-                with st.container(border=True):
-                    st.markdown(f"### Suggestion {number}")
-                    st.caption(f"Model score: {score:.3f}")
-
-                    st.markdown("**TOP — 3 cards**")
-                    st.write(show_cards(top))
-
-                    st.markdown("**MIDDLE — 5 cards**")
-                    st.write(show_cards(middle))
-
-                    st.markdown("**BOTTOM — 5 cards**")
-                    st.write(show_cards(bottom))
-
-                    st.caption(
-                        "Rank categories — "
-                        f"Bottom: {category(rb)}, "
-                        f"Middle: {category(rm)}, "
-                        f"Top: {category(rt)}"
-                    )
-
-                    if number == 1:
-                        st.info(
-                            "This is the model's highest-scoring "
-                            "suggestion for the current weights."
+                    with st.container(border=True):
+                        st.subheader(f"Suggestion {number}")
+                        st.write(f"Model score: {score:.3f}")
+                        st.markdown("**TOP — 3 cards**")
+                        st.write(show_cards(top))
+                        st.markdown("**MIDDLE — 5 cards**")
+                        st.write(show_cards(middle))
+                        st.markdown("**BOTTOM — 5 cards**")
+                        st.write(show_cards(bottom))
+                        st.caption(
+                            f"Categories — Bottom: {category(rb)}, "
+                            f"Middle: {category(rm)}, "
+                            f"Top: {category(rt, top=True)}"
                         )
 
 
 # ------------------------------------------------------------
-# TAB 2: LEARNER, MODEL CHECKPOINTS, AND BACKUP
+# TAB 2: LEARNER & BACKUP
 # ------------------------------------------------------------
 with learner_tab:
+    model = st.session_state.model_state
+    history = model.get("history", [])
+
     st.subheader("Train the strategy model")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric(
-            "Training deals",
-            f"{int(model.get('training_deals', 0)):,}",
-        )
+        st.metric("Training deals", f"{int(model.get('games', 0)):,}")
 
     with col2:
         latest_score = model.get("latest_test_score")
-        score_display = (
-            "Not tested"
-            if latest_score is None
-            else f"{float(latest_score):.3f}"
+        st.metric(
+            "Latest test score",
+            "Not tested" if latest_score is None
+            else f"{float(latest_score):.4f}",
         )
-        st.metric("Latest test score", score_display)
 
     with col3:
-        st.metric(
-            "Training rounds",
-            f"{len(model.get('history', [])):,}",
-        )
+        st.metric("Training rounds", len(history))
 
-    st.write(model.get("latest_result", "No training completed yet."))
+    st.write(
+        model.get("latest_result", "No training completed yet.")
+    )
 
     st.info(
-        "Training compares a proposed set of scoring weights with the "
-        "current weights using simulated deals. Results depend on the "
-        "opponent strategies and random deals used. A higher score on "
-        "these simulations does not prove the strategy is universally best."
+        "Training compares candidate scoring weights against random, "
+        "strong, and balanced simulated opponents. Results are estimates, "
+        "not proof that the strategy is optimal."
     )
 
     training_games = st.select_slider(
-        "Number of training deals",
+        "Training deals",
         options=[25, 50, 100, 250, 500],
-        value=50,
+        value=25,
         key="training_games",
     )
 
@@ -909,29 +852,36 @@ with learner_tab:
         key="train_model_button",
     ):
         with st.spinner(
-            f"Training with {training_games} simulated deals..."
+            "Training and evaluating candidate strategies..."
         ):
             try:
-                old_model = st.session_state.model_state
+                # IMPORTANT:
+                # train() accepts positional arguments (model, games, seed)
+                # and returns (updated_model, report).
+                updated_model, report = train(
+                    st.session_state.model_state,
+                    int(training_games),
+                    int(training_seed),
+                )
 
-                updated_model = train(
-                    old_model,
-                    num_deals=int(training_games),
-                    seed=int(training_seed),
+                updated_model["latest_test_score"] = report["after"]["score"]
+                updated_model["latest_result"] = (
+                    f"Training completed. "
+                    f"Accepted new weights: {report['accepted']}. "
+                    f"Test score before: {report['before']['score']:.4f}. "
+                    f"Test score after: {report['after']['score']:.4f}. "
+                    f"Test deals: {report['test_games']}."
                 )
 
                 st.session_state.model_state = updated_model
 
                 try:
                     save_model(updated_model)
-                    st.success(
-                        "Training finished and the model checkpoint "
-                        "was saved in the app's current environment."
-                    )
+                    st.success("Training complete; checkpoint saved.")
                 except Exception as save_error:
                     st.warning(
-                        "Training finished, but the checkpoint could "
-                        f"not be saved: {save_error}"
+                        "Training completed, but saving the checkpoint "
+                        f"failed: {save_error}"
                     )
 
                 st.rerun()
@@ -942,48 +892,51 @@ with learner_tab:
     st.divider()
     st.subheader("Training history")
 
-    history = model.get("history", [])
+    history = st.session_state.model_state.get("history", [])
 
     if history:
         for entry in reversed(history[-10:]):
-            with st.expander(
-                f"Round {entry.get('round', '?')} — "
-                f"{entry.get('result', 'No result')}"
-            ):
-                st.write(
-                    f"Deals: {entry.get('deals', 'N/A')}"
-                )
-                st.write(
-                    f"Score before: {entry.get('before_score', 'N/A')}"
-                )
-                st.write(
-                    f"Score after: {entry.get('after_score', 'N/A')}"
-                )
-                st.write(
-                    f"Accepted: {entry.get('accepted', 'N/A')}"
-                )
+            title = (
+                f"Total deals: {entry.get('total_games', '?')} — "
+                f"Accepted: {entry.get('accepted', False)}"
+            )
+
+            with st.expander(title):
+                st.write(f"Batch deals: {entry.get('batch_games', 'N/A')}")
+                st.write(f"Training score: {entry.get('train_score', 'N/A')}")
+                st.write(f"Test score before: {entry.get('test_before', 'N/A')}")
+                st.write(f"Test score after: {entry.get('test_after', 'N/A')}")
+                st.write(f"A♦ rate: {entry.get('ad_rate', 'N/A')}")
+                st.write(f"Rate vs A♦ holder: {entry.get('vs_ad_rate', 'N/A')}")
+                st.write(f"Average matchup wins: {entry.get('avg_wins', 'N/A')}")
     else:
-        st.caption("No training history yet. Train the model to begin.")
+        st.caption("No training history yet.")
 
     st.divider()
     st.subheader("Current scoring weights")
 
-    current_weights = normalize_weights(model["weights"])
+    current_weights = normalize_weights(
+        st.session_state.model_state["weights"]
+    )
 
-    for weight_name, weight_value in current_weights.items():
-        st.write(f"**{weight_name.replace('_', ' ').title()}**")
+    for name, value in current_weights.items():
+        st.write(f"**{name.replace('_', ' ').title()}**")
         st.progress(
-            min(1.0, max(0.0, float(weight_value))),
-            text=f"{float(weight_value):.4f}",
+            min(1.0, max(0.0, float(value) / 3.0)),
+            text=f"{float(value):.4f}",
         )
 
     st.divider()
-    st.subheader("Download a model backup")
+    st.subheader("Download model backup")
 
-    checkpoint_json = json.dumps(model, indent=2, ensure_ascii=False)
+    checkpoint_json = json.dumps(
+        st.session_state.model_state,
+        indent=2,
+        ensure_ascii=False,
+    )
 
     st.download_button(
-        label="Download model checkpoint (JSON)",
+        "Download model checkpoint (JSON)",
         data=checkpoint_json,
         file_name="pusoy_rambol_model.json",
         mime="application/json",
@@ -991,24 +944,23 @@ with learner_tab:
     )
 
     st.caption(
-        "Keep this JSON file somewhere safe. Streamlit Community Cloud "
-        "may not preserve files written by the app after a restart or "
-        "redeployment."
+        "Keep a copy of this file. Streamlit Cloud may not preserve "
+        "files written to its local environment after a restart."
     )
 
     st.divider()
-    st.subheader("Restore a model checkpoint")
+    st.subheader("Restore model checkpoint")
 
     uploaded_checkpoint = st.file_uploader(
-        "Choose a previously downloaded model JSON file",
+        "Choose a saved model JSON file",
         type=["json"],
         key="checkpoint_uploader",
     )
 
     if st.button(
-        "Restore uploaded checkpoint",
-        use_container_width=True,
+        "Restore checkpoint",
         disabled=uploaded_checkpoint is None,
+        use_container_width=True,
         key="restore_checkpoint_button",
     ):
         try:
@@ -1017,22 +969,15 @@ with learner_tab:
             if not isinstance(restored_model, dict):
                 raise ValueError("The JSON root must be an object.")
 
-            if "weights" not in restored_model:
-                raise ValueError("The file does not contain model weights.")
-
-            if not isinstance(restored_model["weights"], dict):
-                raise ValueError("The model weights must be an object.")
+            if not isinstance(restored_model.get("weights"), dict):
+                raise ValueError("Checkpoint has no valid weights.")
 
             restored_model["weights"] = normalize_weights(
                 restored_model["weights"]
             )
+            restored_model.setdefault("games", 0)
             restored_model.setdefault("history", [])
-            restored_model.setdefault("training_deals", 0)
-            restored_model.setdefault("latest_test_score", None)
-            restored_model.setdefault(
-                "latest_result",
-                "Restored from checkpoint.",
-            )
+            restored_model.setdefault("version", 3)
 
             st.session_state.model_state = restored_model
 
@@ -1041,26 +986,17 @@ with learner_tab:
             except Exception:
                 pass
 
-            st.success("Checkpoint loaded into the current session.")
+            st.success("Checkpoint restored into the current session.")
             st.rerun()
 
         except Exception as restore_error:
-            st.error(
-                f"Could not restore this checkpoint: {restore_error}"
-            )
+            st.error(f"Could not restore checkpoint: {restore_error}")
 
     st.divider()
     st.subheader("Reset model")
 
-    st.warning(
-        "Resetting replaces the current learned weights and training "
-        "history with the default model. Download a backup first if "
-        "you want to keep your progress."
-    )
-
     confirm_reset = st.checkbox(
-        "I understand that resetting removes the current session's "
-        "learned model and history.",
+        "I understand that this resets the learned weights and history.",
         key="confirm_reset_model",
     )
 
@@ -1070,7 +1006,13 @@ with learner_tab:
         use_container_width=True,
         key="reset_model_button",
     ):
-        fresh_model = initial_model()
+        fresh_model = {
+            "weights": DEFAULT_WEIGHTS.copy(),
+            "games": 0,
+            "history": [],
+            "version": 3,
+        }
+
         st.session_state.model_state = fresh_model
 
         try:
@@ -1078,25 +1020,23 @@ with learner_tab:
         except Exception:
             pass
 
-        st.success("The default model is loaded.")
+        st.success("Default model restored.")
         st.rerun()
 
 
 # ------------------------------------------------------------
-# TAB 3: RULES AND MODEL NOTES
+# TAB 3: RULES
 # ------------------------------------------------------------
 with rules_tab:
-    st.subheader("Pusoy Rambol rules used by this app")
+    st.subheader("Pusoy Rambol rules")
 
     st.markdown(
         """
         **Deal**
-        - A standard 52-card deck is used.
-        - Four players receive 13 cards each.
-        - Each player's 13 cards are arranged exactly once into:
-          Bottom (5), Middle (5), and Top (3).
+        - Standard 52-card deck; four players; 13 cards each.
+        - Arrange all 13 cards into Bottom (5), Middle (5), Top (3).
 
-        **Five-card hand rankings, strongest to weakest**
+        **Five-card rankings, strongest to weakest**
         1. Straight Flush
         2. Four of a Kind
         3. Full House
@@ -1107,56 +1047,38 @@ with rules_tab:
         8. One Pair
         9. High Card
 
-        **Top three-card hand rankings**
+        **Top three-card rankings**
         1. Three of a Kind
         2. Pair
         3. High Card
 
-        Straights and flushes do not apply to the Top hand.
+        Straights and flushes do not apply to Top.
 
         **Foul rule**
-        - Bottom must be stronger than or equal to Middle.
-        - Middle must be stronger than or equal to Top.
-        - Equal strength is allowed under the rule you specified.
+        Bottom must be stronger than or equal to Middle, and Middle
+        must be stronger than or equal to Top. The current implementation
+        uses its encoded category comparisons for this rule.
 
-        **Head-to-head scoring**
-        - Bottom is compared with Bottom.
-        - Middle is compared with Middle.
-        - Top is compared with Top.
-        - Winning at least two of the three rows wins the head-to-head.
-        - If neither player wins at least two rows, the result is a draw.
+        **Head-to-head**
+        - Compare Bottom against Bottom, Middle against Middle,
+          and Top against Top.
+        - Winning at least two rows wins the head-to-head.
+        - If neither player wins two rows, the result is a draw.
 
         **A♦ tie-break**
-        - When two compared rows tie, the app checks whether a player
-          holds A♦ anywhere in their 13-card hand.
-        - This is your special rule and is separate from ordinary
-          poker hand rankings.
+        When a row is otherwise tied, the player holding A♦ anywhere
+        in their 13-card hand wins that row tie.
         """
     )
 
     st.divider()
-    st.subheader("Important model limitations")
+    st.subheader("Model limitations")
 
-    st.markdown(
-        """
-        - The learner improves its scoring weights through simulated
-          games; it does not prove that an arrangement is globally optimal.
-        - The hand solver's suggestions depend on the candidate search
-          and current model weights.
-        - Training performance on simulated deals may not predict
-          performance against every real opponent.
-        - A downloaded JSON checkpoint is the safest way to preserve
-          training progress between Streamlit Cloud restarts.
-        """
-    )
-
-    st.caption(
-        "If a result seems inconsistent with your table rules, "
-        "record the 13 cards and the suggested rows so the ranking "
-        "or comparison logic can be checked."
+    st.write(
+        "Training uses simulated deals and heuristic candidate selection. "
+        "A higher test score does not prove a strategy is universally best. "
+        "Download checkpoints to preserve learned weights and history."
     )
 
 st.divider()
-st.caption(
-    "Pusoy Rambol Solver — personal strategy-learning project."
-)
+st.caption("Pusoy Rambol Solver — personal strategy-learning project.")
