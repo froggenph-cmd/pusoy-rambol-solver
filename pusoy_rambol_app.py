@@ -17,8 +17,15 @@ MODEL_PATH = "pusoy_rambol_model.json"
 DEFAULT_WEIGHTS = {"bottom":1.0,"middle":1.0,"top":1.0,"top_kicker":0.08,"balance":0.18,"category":0.02}
 
 
-def card_label(c): return f"{RANK_LABEL[c[0]]}{SUIT_SYMBOL[c[1]]}"
+def card_label(c):
+    # Emoji presentation keeps hearts/diamonds visibly red on most mobile devices.
+    suit = SUIT_SYMBOL[c[1]] + ("︎" if c[1] in ("C", "S") else "️")
+    return f"{RANK_LABEL[c[0]]}{suit}"
+
 def show_cards(cards): return " ".join(card_label(c) for c in cards)
+
+# Give interactive card buttons a playing-card face rather than the default flat button look.
+st.markdown(""" <style> /* Card-picker buttons: white face, rounded corners, subtle border and shadow. */ div[data-testid="stButton"] > button { min-height: 48px; padding: 0.35rem 0.2rem; border: 1px solid #b9bec7; border-radius: 9px; background: linear-gradient(145deg, #ffffff 0%, #f7f7f7 100%); color: #20242b; box-shadow: 0 2px 3px rgba(0,0,0,.14); font-size: 1.05rem; font-weight: 650; } div[data-testid="stButton"] > button:hover { border-color: #687385; background: #fff; transform: translateY(-1px); } div[data-testid="stButton"] > button[kind="primary"] { border: 2px solid #3977c3; background: #e8f1ff; color: #173e72; } </style> """, unsafe_allow_html=True)
 def straight_high(values):
     vals = sorted(set(values))
     if len(vals) != 5: return None
@@ -334,7 +341,7 @@ solver_tab,learner_tab,play_tab,rules_tab=st.tabs(["Hand solver","Self-play lear
 
 with solver_tab:
     st.subheader("Find strong arrangements for your 13 cards")
-    st.info("Tap cards to select or unselect them. Select exactly 13, then find strong arrangements.")
+    st.info("Tap the playing cards to select or unselect them. Hearts and diamonds are red; clubs and spades are black. Select exactly 13, then find strong arrangements.")
     chosen_key = "solver_selected_cards"
     if chosen_key not in st.session_state:
         st.session_state[chosen_key] = []
@@ -447,7 +454,7 @@ with play_tab:
         st.session_state.pop("human_game_result", None)
 
     if hand_mode == "Deal random cards":
-        st.caption("A fresh shuffled deck is used when you deal. Your opponents receive the other 39 cards.")
+        st.caption("A fresh shuffled deck is used when you deal. Your opponents receive the other 39 cards. A♦ breaks an otherwise tied row comparison when exactly one player holds it.")
         if st.button("Deal me 13 random cards", type="primary", use_container_width=True, key="deal_random_human_hand"):
             shuffled_deck = DECK.copy()
             random.SystemRandom().shuffle(shuffled_deck)
@@ -459,6 +466,7 @@ with play_tab:
             st.rerun()
     else:
         st.markdown("**Tap 13 cards to select your hand**")
+        st.caption("Hearts and diamonds are red; clubs and spades are black. A♦ is dealt normally and its tie-break rule applies during play.")
         select_key = "human_custom_selected_cards"
         if select_key not in st.session_state:
             st.session_state[select_key] = []
@@ -489,6 +497,7 @@ with play_tab:
     human_hand = st.session_state.get("human_hand")
     if human_hand:
         st.markdown("### Your 13 cards")
+        st.caption("A♦ rule: if a row comparison is otherwise tied, the player holding A♦ anywhere in their 13-card hand wins that row. Special-hand rules take priority.")
         st.caption("Tap a card to select it, then tap the row where you want to place it. Tap a card already in a row to select it and move it to another row.")
         rows = st.session_state.setdefault("human_rows", {"Bottom": [], "Middle": [], "Top": []})
         # Reconcile saved row state with the current hand.
@@ -550,13 +559,55 @@ with play_tab:
                     opp_rng = random.Random(game_seed * 1009 + i * 9176 + 31)
                     opponent_arrangements.append(choose_arrangement(opp_hand, normalize_weights(st.session_state.model_state["weights"]), "learned", opp_rng))
                 human_special = detect_special_hand(human_hand)
-                results = [compare_arrangements(opp_arr, human_arr, opp_hand, human_hand) for opp_arr, opp_hand in zip(opponent_arrangements, opponent_hands)]
-                st.session_state.human_game_result = {"human_hand": human_hand, "human_arrangement": human_arr, "opponent_hands": opponent_hands, "opponent_arrangements": opponent_arrangements, "results": results, "human_special": human_special, "seed": game_seed}
+                # Keep human-vs-each-opponent results for learner feedback, but also
+                # compare every other player directly against the A♦ holder.
+                results = [compare_arrangements(human_arr, opp_arr, human_hand, opp_hand) for opp_arr, opp_hand in zip(opponent_arrangements, opponent_hands)]
+                all_hands = [human_hand] + opponent_hands
+                all_arrangements = [human_arr] + opponent_arrangements
+                ad_holder_index = next((i for i, hand in enumerate(all_hands) if "AD" in hand), None)
+                ad_comparisons = []
+                if ad_holder_index is not None:
+                    for i in range(4):
+                        if i == ad_holder_index:
+                            continue
+                        # Outcome is from the A♦ holder's perspective: 1=holder wins, -1=other player wins.
+                        ad_comparisons.append({
+                            "player_index": i,
+                            "outcome": compare_arrangements(
+                                all_arrangements[ad_holder_index], all_arrangements[i],
+                                all_hands[ad_holder_index], all_hands[i]
+                            )
+                        })
+                st.session_state.human_game_result = {
+                    "human_hand": human_hand, "human_arrangement": human_arr,
+                    "opponent_hands": opponent_hands, "opponent_arrangements": opponent_arrangements,
+                    "results": results, "human_special": human_special, "seed": game_seed,
+                    "ad_holder_index": ad_holder_index, "ad_comparisons": ad_comparisons
+                }
                 st.rerun()
 
     game = st.session_state.get("human_game_result")
     if game:
         st.markdown("### Deal result")
+        all_hands = [game["human_hand"]] + game["opponent_hands"]
+        all_arrangements = [game["human_arrangement"]] + game["opponent_arrangements"]
+        ad_holder_index = game.get("ad_holder_index", next((i for i, hand in enumerate(all_hands) if "AD" in hand), 0))
+        ad_holder_name = "You" if ad_holder_index == 0 else f"Opponent {ad_holder_index}"
+        st.info(f"**A♦ holder: {ad_holder_name}.** The other three players are compared directly against this player's arrangement. A♦ breaks otherwise-tied rows in the holder's favor; special-hand rules take priority.")
+        st.markdown("### Results against the A♦ holder")
+        for comparison in game.get("ad_comparisons", []):
+            player_index = comparison["player_index"]
+            outcome = comparison["outcome"]
+            other_name = "You" if player_index == 0 else f"Opponent {player_index}"
+            if outcome == 1:
+                result_text = f"{ad_holder_name} wins 2 or more rows"
+            elif outcome == -1:
+                result_text = f"{other_name} wins 2 or more rows"
+            else:
+                result_text = "Head-to-head draw"
+            st.write(f"- **{other_name} vs {ad_holder_name}:** {result_text}")
+        if game["human_special"]:
+            st.success("Your special hand: " + ", ".join(game["human_special"]))
         if game["human_special"]:
             st.success("Your special hand: " + ", ".join(game["human_special"]))
         hcols = st.columns(3)
