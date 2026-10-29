@@ -99,7 +99,7 @@ def category(rank, top=False):
 def foul_free(bottom,middle,top):
     rb,rm,rt=rank_five(bottom),rank_five(middle),rank_top(top)
     # Retains the app's current rule; confirm cross-row rules with the user before treating as final.
-    return rb >= rm and rm[0] >= rt[0]
+    return rb >= rm and rm >= rt
 
 def tie_value(rank):
     value=rank[0]*100000.0
@@ -114,14 +114,14 @@ def arrangement_candidates(hand, sample_count=450, rng=None):
             for m in combinations(rest,5):
                 mset=set(m); top=tuple(c for c in rest if c not in mset)
                 rm,rt=rank_five(m),rank_top(top)
-                if rb < rm or rm[0] < rt[0]: continue
+                if rb < rm or rm < rt: continue
                 key=(tuple(sorted(b)),tuple(sorted(m)),tuple(sorted(top)))
                 found[key]=(b,m,top,rb,rm,rt)
     else:
         for _ in range(sample_count):
             perm=list(hand); rng.shuffle(perm); b,m,top=tuple(perm[:5]),tuple(perm[5:10]),tuple(perm[10:13])
             rb,rm,rt=rank_five(b),rank_five(m),rank_top(top)
-            if rb < rm or rm[0] < rt[0]: continue
+            if rb < rm or rm < rt: continue
             key=(tuple(sorted(b)),tuple(sorted(m)),tuple(sorted(top)))
             found[key]=(b,m,top,rb,rm,rt)
         # Add high-value bottom/middle combinations for better sample coverage.
@@ -133,7 +133,7 @@ def arrangement_candidates(hand, sample_count=450, rng=None):
                 rm=rank_five(m)
                 if rb < rm: continue
                 top=tuple(c for c in rest if c not in set(m)); rt=rank_top(top)
-                if rm[0] < rt[0]: continue
+                if rm < rt: continue
                 key=(tuple(sorted(b)),tuple(sorted(m)),tuple(sorted(top)))
                 found.setdefault(key,(b,m,top,rb,rm,rt))
                 if len(found)>=sample_count+180: break
@@ -644,6 +644,6 @@ with play_tab:
 
 with rules_tab:
     st.subheader("Rules currently encoded")
-    st.markdown("- Play vs learner lets you arrange a hand against three learner-controlled opponents and record results for online weight updates.\n- Standard 52-card deck; four players receive 13 cards each.\n- A♦ is randomly distributed by shuffling and dealing.\n- Bottom 5, Middle 5, Top 3; no card reused.\n- Five-card ranking: Straight Flush > Four of a Kind > Full House > Flush > Straight > Three of a Kind > Two Pair > One Pair > High Card.\n- Top ranking: Three of a Kind > Pair > High Card; straights and flushes do not count in Top.\n- Special hands are checked across all 13 cards before ordinary row comparisons: any five-card straight flush in one suit, four of a kind, or six pair-units.\n- Four of a kind counts as two pairs toward the six-pairs special hand.\n- A qualifying special hand beats every non-qualifying hand 3–0 regardless of arrangement. If both players qualify, they tie against each other.\n- Ordinary head-to-head win: win at least two of the three corresponding rows.\n- A♦ breaks otherwise-equal row ties if exactly one player holds it anywhere in their hand.\n- Current foul check: Bottom rank ≥ Middle rank and Middle category ≥ Top category.")
-    st.warning("The cross-row foul rule remains simplified from the existing app and must be confirmed against your table's exact rule before treating the simulator as rules-perfect.")
+    st.markdown("- Play vs learner lets you arrange a hand against three learner-controlled opponents and record results for online weight updates.\n- Standard 52-card deck; four players receive 13 cards each.\n- A♦ is randomly distributed by shuffling and dealing.\n- Bottom 5, Middle 5, Top 3; no card reused.\n- Five-card ranking: Straight Flush > Four of a Kind > Full House > Flush > Straight > Three of a Kind > Two Pair > One Pair > High Card.\n- Top ranking: Three of a Kind > Pair > High Card; straights and flushes do not count in Top.\n- Special hands are checked across all 13 cards before ordinary row comparisons: any five-card straight flush in one suit, four of a kind, or six pair-units.\n- Four of a kind counts as two pairs toward the six-pairs special hand.\n- A qualifying special hand beats every non-qualifying hand 3–0 regardless of arrangement. If both players qualify, they tie against each other.\n- Ordinary head-to-head win: win at least two of the three corresponding rows.\n- A♦ breaks otherwise-equal row ties if exactly one player holds it anywhere in their hand.\n- Foul check: Bottom rank ≥ Middle rank ≥ Top rank, including kickers/tie-break details.")
+    st.warning("Foul detection compares the complete hand ranks, including kickers, so a weaker Middle hand cannot sit above a stronger Top hand.")
     st.write("Download the JSON checkpoint after training. Streamlit Community Cloud may reset local files on restart or redeployment.")
