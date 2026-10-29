@@ -98,8 +98,14 @@ def category(rank, top=False):
 
 def foul_free(bottom,middle,top):
     rb,rm,rt=rank_five(bottom),rank_five(middle),rank_top(top)
-    # Retains the app's current rule; confirm cross-row rules with the user before treating as final.
     return rb >= rm and rm >= rt
+
+def arrangement_is_foul(arrangement):
+    """True when Bottom < Middle or Middle < Top, including kickers."""
+    if arrangement is None:
+        return True
+    rb,rm,rt=arrangement[3],arrangement[4],arrangement[5]
+    return not (rb >= rm and rm >= rt)
 
 def tie_value(rank):
     value=rank[0]*100000.0
@@ -188,9 +194,18 @@ def play_deal(hands,weights,deal_seed,opponent_modes=("random","strong","balance
             raise RuntimeError("Could not find a foul-free arrangement for a dealt hand.")
         arrangements.append(arrangement)
 
+    fouls = [arrangement_is_foul(arr) for arr in arrangements]
     results=[]
     for j in range(1,4):
-        if qualifies[0] and qualifies[j]:
+        # A foul overrides both A♦ and special-hand advantages: the fouled player
+        # loses all three rows against every non-fouled opponent.
+        if fouls[0] and not fouls[j]:
+            result=-1
+        elif fouls[j] and not fouls[0]:
+            result=1
+        elif fouls[0] and fouls[j]:
+            result=0  # Both are fouled; neither is a non-fouled opponent.
+        elif qualifies[0] and qualifies[j]:
             # Two qualifying special hands tie against each other.
             result=0
         elif qualifies[0]:
@@ -209,6 +224,7 @@ def play_deal(hands,weights,deal_seed,opponent_modes=("random","strong","balance
         "vs_ad_holder":None if holder==0 else results[holder-1],
         "special_hands":special_hands,
         "p1_special_hand":special_hands[0],
+        "fouls":fouls,
     }
 
 
@@ -391,7 +407,7 @@ with solver_tab:
 
 with learner_tab:
     st.subheader("Player 1 controlled self-play learning")
-    st.write("A♦ is shuffled into one of the four hands. Player 1 learns to maximize wins against all three opponents when holding A♦, and prioritize beating the A♦ holder otherwise.")
+    st.write("A♦ is shuffled into one of the four hands. Player 1 learns to maximize wins against all three opponents when holding A♦, and prioritize beating the A♦ holder otherwise. Foul handling is applied in every self-play deal: a fouled arrangement loses all three rows against each non-fouled opponent, overriding A♦ and special-hand advantages.")
     c1,c2,c3=st.columns(3)
     c1.metric("Training deals recorded",f"{model.get('games',0):,}")
     last=(model.get("history") or [{}])[-1]
@@ -545,46 +561,51 @@ with play_tab:
         if st.button("Play this arrangement", type="primary", use_container_width=True, disabled=not ready, key="human_play_arrangement"):
             b, m, t = list(rows["Bottom"]), list(rows["Middle"]), list(rows["Top"])
             human_arr = (tuple(b), tuple(m), tuple(t), rank_five(b), rank_five(m), rank_top(t))
-            if not foul_free(b, m, t):
-                st.error("This arrangement is foul under the app's current rule: Bottom must be at least as strong as Middle, and Middle category must be at least Top category.")
-            else:
-                opponent_hands = st.session_state.get("human_predealt_opponents")
-                if not opponent_hands or len(opponent_hands) != 3 or set(sum(opponent_hands, [])) != set(DECK) - set(human_hand):
-                    remaining = [c for c in DECK if c not in set(human_hand)]
-                    rr = random.Random(random.SystemRandom().randrange(1, 2**31-1)); rr.shuffle(remaining)
-                    opponent_hands = [remaining[i*13:(i+1)*13] for i in range(3)]
-                game_seed = random.SystemRandom().randrange(1, 2**31-1)
-                opponent_arrangements = []
-                for i, opp_hand in enumerate(opponent_hands):
-                    opp_rng = random.Random(game_seed * 1009 + i * 9176 + 31)
-                    opponent_arrangements.append(choose_arrangement(opp_hand, normalize_weights(st.session_state.model_state["weights"]), "learned", opp_rng))
-                human_special = detect_special_hand(human_hand)
-                # Keep human-vs-each-opponent results for learner feedback, but also
-                # compare every other player directly against the A♦ holder.
-                results = [compare_arrangements(human_arr, opp_arr, human_hand, opp_hand) for opp_arr, opp_hand in zip(opponent_arrangements, opponent_hands)]
-                all_hands = [human_hand] + opponent_hands
-                all_arrangements = [human_arr] + opponent_arrangements
-                ad_holder_index = next((i for i, hand in enumerate(all_hands) if "AD" in hand), None)
-                ad_comparisons = []
-                if ad_holder_index is not None:
-                    for i in range(4):
-                        if i == ad_holder_index:
-                            continue
-                        # Outcome is from the A♦ holder's perspective: 1=holder wins, -1=other player wins.
-                        ad_comparisons.append({
-                            "player_index": i,
-                            "outcome": compare_arrangements(
-                                all_arrangements[ad_holder_index], all_arrangements[i],
-                                all_hands[ad_holder_index], all_hands[i]
-                            )
-                        })
-                st.session_state.human_game_result = {
-                    "human_hand": human_hand, "human_arrangement": human_arr,
-                    "opponent_hands": opponent_hands, "opponent_arrangements": opponent_arrangements,
-                    "results": results, "human_special": human_special, "seed": game_seed,
-                    "ad_holder_index": ad_holder_index, "ad_comparisons": ad_comparisons
-                }
-                st.rerun()
+            human_foul = not foul_free(b, m, t)
+            if human_foul:
+                st.warning("Your arrangement is FOUL. Under your rules, a foul is an instant loss of all three rows (Bottom, Middle, and Top) against every non-fouled opponent.")
+            opponent_hands = st.session_state.get("human_predealt_opponents")
+            if not opponent_hands or len(opponent_hands) != 3 or set(sum(opponent_hands, [])) != set(DECK) - set(human_hand):
+                remaining = [c for c in DECK if c not in set(human_hand)]
+                rr = random.Random(random.SystemRandom().randrange(1, 2**31-1)); rr.shuffle(remaining)
+                opponent_hands = [remaining[i*13:(i+1)*13] for i in range(3)]
+            game_seed = random.SystemRandom().randrange(1, 2**31-1)
+            opponent_arrangements = []
+            for i, opp_hand in enumerate(opponent_hands):
+                opp_rng = random.Random(game_seed * 1009 + i * 9176 + 31)
+                opponent_arrangements.append(choose_arrangement(opp_hand, normalize_weights(st.session_state.model_state["weights"]), "learned", opp_rng))
+            human_special = detect_special_hand(human_hand)
+            # A foul is an automatic 0-3 loss against every non-fouled opponent.
+            # Opponent arrangements are generated foul-free by the solver.
+            # Keep human-vs-each-opponent results for learner feedback, but also
+            # compare every other player directly against the A♦ holder.
+            results = [-1 if human_foul else compare_arrangements(human_arr, opp_arr, human_hand, opp_hand) for opp_arr, opp_hand in zip(opponent_arrangements, opponent_hands)]
+            all_hands = [human_hand] + opponent_hands
+            all_arrangements = [human_arr] + opponent_arrangements
+            ad_holder_index = next((i for i, hand in enumerate(all_hands) if "AD" in hand), None)
+            ad_comparisons = []
+            if ad_holder_index is not None:
+                for i in range(4):
+                    if i == ad_holder_index:
+                        continue
+                    # Outcome is from the A♦ holder's perspective: 1=holder wins, -1=other player wins.
+                    if human_foul and ad_holder_index == 0:
+                        outcome = -1  # Fouled A♦ holder loses to every non-fouled opponent.
+                    elif human_foul and i == 0:
+                        outcome = 1   # The other player beats the fouled human.
+                    else:
+                        outcome = compare_arrangements(
+                            all_arrangements[ad_holder_index], all_arrangements[i],
+                            all_hands[ad_holder_index], all_hands[i]
+                        )
+                    ad_comparisons.append({"player_index": i, "outcome": outcome})
+            st.session_state.human_game_result = {
+                "human_hand": human_hand, "human_arrangement": human_arr,
+                "opponent_hands": opponent_hands, "opponent_arrangements": opponent_arrangements,
+                "results": results, "human_special": human_special, "human_foul": human_foul, "seed": game_seed,
+                "ad_holder_index": ad_holder_index, "ad_comparisons": ad_comparisons
+            }
+            st.rerun()
 
     game = st.session_state.get("human_game_result")
     if game:
@@ -593,7 +614,9 @@ with play_tab:
         all_arrangements = [game["human_arrangement"]] + game["opponent_arrangements"]
         ad_holder_index = game.get("ad_holder_index", next((i for i, hand in enumerate(all_hands) if "AD" in hand), 0))
         ad_holder_name = "You" if ad_holder_index == 0 else f"Opponent {ad_holder_index}"
-        st.info(f"**A♦ holder: {ad_holder_name}.** The other three players are compared directly against this player's arrangement. A♦ breaks otherwise-tied rows in the holder's favor; special-hand rules take priority.")
+        if game.get("human_foul"):
+            st.error("FOUL — You lose Bottom, Middle, and Top (0–3) against each opponent. A foul overrides A♦ and special-hand advantages.")
+        st.info(f"**A♦ holder: {ad_holder_name}.** The other three players are compared directly against this player's arrangement. A♦ breaks otherwise-tied rows in the holder's favor; foul results override ordinary comparisons.")
         st.markdown("### Results against the A♦ holder")
         for comparison in game.get("ad_comparisons", []):
             player_index = comparison["player_index"]
@@ -644,6 +667,6 @@ with play_tab:
 
 with rules_tab:
     st.subheader("Rules currently encoded")
-    st.markdown("- Play vs learner lets you arrange a hand against three learner-controlled opponents and record results for online weight updates.\n- Standard 52-card deck; four players receive 13 cards each.\n- A♦ is randomly distributed by shuffling and dealing.\n- Bottom 5, Middle 5, Top 3; no card reused.\n- Five-card ranking: Straight Flush > Four of a Kind > Full House > Flush > Straight > Three of a Kind > Two Pair > One Pair > High Card.\n- Top ranking: Three of a Kind > Pair > High Card; straights and flushes do not count in Top.\n- Special hands are checked across all 13 cards before ordinary row comparisons: any five-card straight flush in one suit, four of a kind, or six pair-units.\n- Four of a kind counts as two pairs toward the six-pairs special hand.\n- A qualifying special hand beats every non-qualifying hand 3–0 regardless of arrangement. If both players qualify, they tie against each other.\n- Ordinary head-to-head win: win at least two of the three corresponding rows.\n- A♦ breaks otherwise-equal row ties if exactly one player holds it anywhere in their hand.\n- Foul check: Bottom rank ≥ Middle rank ≥ Top rank, including kickers/tie-break details.")
-    st.warning("Foul detection compares the complete hand ranks, including kickers, so a weaker Middle hand cannot sit above a stronger Top hand.")
+    st.markdown("- Play vs learner lets you arrange a hand against three learner-controlled opponents and record results for online weight updates.\n- Standard 52-card deck; four players receive 13 cards each.\n- A♦ is randomly distributed by shuffling and dealing.\n- Bottom 5, Middle 5, Top 3; no card reused.\n- Five-card ranking: Straight Flush > Four of a Kind > Full House > Flush > Straight > Three of a Kind > Two Pair > One Pair > High Card.\n- Top ranking: Three of a Kind > Pair > High Card; straights and flushes do not count in Top.\n- Special hands are checked across all 13 cards before ordinary row comparisons: any five-card straight flush in one suit, four of a kind, or six pair-units.\n- Four of a kind counts as two pairs toward the six-pairs special hand.\n- A qualifying special hand beats every non-qualifying hand 3–0 regardless of arrangement. If both players qualify, they tie against each other.\n- Ordinary head-to-head win: win at least two of the three corresponding rows.\n- A♦ breaks otherwise-equal row ties if exactly one player holds it anywhere in their hand.\n- Foul check: Bottom rank ≥ Middle rank ≥ Top rank, including kickers/tie-break details. A foul is an instant 0–3 loss (Bottom, Middle, and Top) against every non-fouled opponent; foul overrides A♦ and special-hand advantages.")
+    st.warning("A foul is an instant loss of all three rows against each non-fouled opponent. It overrides A♦ and special-hand advantages.")
     st.write("Download the JSON checkpoint after training. Streamlit Community Cloud may reset local files on restart or redeployment.")
